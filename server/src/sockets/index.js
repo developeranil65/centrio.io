@@ -1,5 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Workspace = require('../models/Workspace');
+const Board = require('../models/Board');
 const drawingHandler = require('./drawing.handler');
 const diagramHandler = require('./diagram.handler');
 const cursorHandler = require('./cursor.handler');
@@ -58,11 +60,30 @@ const initSocket = (io) => {
         userSocketMap.set(socket.userId, socket.id);
 
         // ── Room management ──
-        socket.on('room:join', (data) => {
-            const { boardId } = data;
+        socket.on('room:join', async (data) => {
+            const { boardId, workspaceId } = data;
             socket.join(boardId);
             socket.boardId = boardId; // track for disconnect cleanup
             console.log(`${socket.userName} joined room ${boardId}`);
+
+            // Also join workspace room for workspace-scoped chat & video
+            if (workspaceId) {
+                socket.join(`ws-${workspaceId}`);
+                socket.workspaceId = workspaceId;
+                console.log(`${socket.userName} joined workspace room ws-${workspaceId}`);
+            } else {
+                // Try to resolve workspace from board
+                try {
+                    const board = await Board.findById(boardId);
+                    if (board?.workspace) {
+                        socket.join(`ws-${board.workspace}`);
+                        socket.workspaceId = board.workspace.toString();
+                        console.log(`${socket.userName} joined workspace room ws-${board.workspace} (resolved from board)`);
+                    }
+                } catch (err) {
+                    console.error('Error resolving workspace for board:', err);
+                }
+            }
 
             // Notify others in the room
             socket.to(boardId).emit('room:user-joined', {
@@ -89,9 +110,36 @@ const initSocket = (io) => {
         chatHandler(socket, io);
         pageHandler(socket, io);
 
-        // ── Video Call Signaling (fixed routing via userSocketMap) ──
-        socket.on('call:join-room', (data) => {
+        // ── Video Call Signaling (with workspace isolation) ──
+        socket.on('call:join-room', async (data) => {
             const { roomId } = data;
+
+            // ── Access control: verify user belongs to this workspace ──
+            if (!socket.isGuest) {
+                try {
+                    const workspace = await Workspace.findById(roomId);
+                    if (workspace) {
+                        const isMember = workspace.members.some(
+                            (m) => m.user.toString() === socket.userId
+                        );
+                        if (!isMember) {
+                            console.warn(`[Security] ${socket.userName} denied video access to workspace ${roomId}`);
+                            socket.emit('call:error', { message: 'Not a member of this workspace' });
+                            return;
+                        }
+                    }
+                } catch (err) {
+                    console.error('Error checking video call access:', err);
+                }
+            } else {
+                // Guests: only allow if they're already in a board room
+                if (!socket.boardId) {
+                    console.warn(`[Security] Guest ${socket.userName} denied video — not in any board room`);
+                    socket.emit('call:error', { message: 'Join a board first' });
+                    return;
+                }
+            }
+
             socket.join(`video-${roomId}`);
             console.log(`[Call] ${socket.userName} joined video room video-${roomId}`);
         });
@@ -156,16 +204,16 @@ const initSocket = (io) => {
 
             // Broadcast to all rooms this socket was in
             const rooms = Array.from(socket.rooms).filter((r) => r !== socket.id);
-            rooms.forEach((boardId) => {
-                io.to(boardId).emit('room:user-left', {
+            rooms.forEach((roomName) => {
+                io.to(roomName).emit('room:user-left', {
                     userId: socket.userId,
                     userName: socket.userName,
                 });
                 // Also end any call for this socket
-                io.to(boardId).emit('call:end', {
+                io.to(roomName).emit('call:end', {
                     from: socket.id,
                 });
-                io.to(`video-${boardId}`).emit('call:end', {
+                io.to(`video-${roomName}`).emit('call:end', {
                     from: socket.id,
                 });
             });

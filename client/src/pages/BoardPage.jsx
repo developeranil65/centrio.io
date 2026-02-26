@@ -134,6 +134,9 @@ export default function BoardPage() {
     const [remoteCursors, setRemoteCursors] = useState({});
     const [onlineUsers, setOnlineUsers] = useState([]);
 
+    // Track remote user strokes by userId → line index for multi-user drawing
+    const remoteStrokesRef = useRef({});
+
     const stageRef = useRef(null);
     const containerRef = useRef(null);
     const trRef = useRef(null);
@@ -156,7 +159,8 @@ export default function BoardPage() {
                 // Fetch other boards in the same workspace for the switcher (only for auth users)
                 if (user && b.workspace) {
                     try {
-                        const wsBoards = await getBoards(b.workspace);
+                        const wsId = typeof b.workspace === 'object' ? b.workspace._id : b.workspace;
+                        const wsBoards = await getBoards(wsId);
                         setWorkspaceBoards(wsBoards.data);
                     } catch (err) {
                         console.error('Failed to load workspace boards', err);
@@ -199,19 +203,17 @@ export default function BoardPage() {
         load();
     }, [boardId]);
 
-    // ── Resize ──
+    // ── Resize — use ResizeObserver so stage resizes when panels toggle ──
     useEffect(() => {
-        const handleResize = () => {
-            if (containerRef.current) {
-                setStageSize({
-                    width: containerRef.current.offsetWidth,
-                    height: containerRef.current.offsetHeight,
-                });
+        const container = containerRef.current;
+        if (!container) return;
+        const obs = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+                setStageSize({ width: entry.contentRect.width, height: entry.contentRect.height });
             }
-        };
-        handleResize();
-        window.addEventListener('resize', handleResize);
-        return () => window.removeEventListener('resize', handleResize);
+        });
+        obs.observe(container);
+        return () => obs.disconnect();
     }, [loading]);
 
     // ── Transformer attach — supports multi-select ──
@@ -236,7 +238,9 @@ export default function BoardPage() {
     // ── Socket room ──
     useEffect(() => {
         if (!socket || !boardId) return;
-        socket.emit('room:join', { boardId });
+        // Send workspaceId along with board join for workspace-scoped chat/video
+        const wsId = board?.workspace;
+        socket.emit('room:join', { boardId, workspaceId: wsId });
 
         socket.on('room:user-joined', (data) => {
             setOnlineUsers((prev) => {
@@ -252,25 +256,35 @@ export default function BoardPage() {
                 delete next[data.userId];
                 return next;
             });
+            // Clean up stroke tracking for this user
+            delete remoteStrokesRef.current[data.userId];
         });
 
-        // Remote drawing — only apply if on same page
+        // Remote drawing — per-userId stroke tracking for multi-user support
         socket.on('draw:start', (data) => {
             if (data.pageId && data.pageId !== activePageIdRef.current) return;
-            setLines((prev) => [...prev, { points: data.stroke?.points || [], color: data.stroke?.color || '#fff', width: data.stroke?.width || 4, tool: data.stroke?.tool || 'pencil', userId: data.userId }]);
+            setLines((prev) => {
+                const newLine = { points: data.stroke?.points || [], color: data.stroke?.color || '#fff', width: data.stroke?.width || 4, tool: data.stroke?.tool || 'pencil', userId: data.userId };
+                const newLines = [...prev, newLine];
+                // Record this user's line index
+                remoteStrokesRef.current[data.userId] = newLines.length - 1;
+                return newLines;
+            });
         });
         socket.on('draw:move', (data) => {
             if (data.pageId && data.pageId !== activePageIdRef.current) return;
+            const lineIdx = remoteStrokesRef.current[data.userId];
+            if (lineIdx === undefined) return;
             setLines((prev) => {
+                if (lineIdx >= prev.length) return prev;
                 const updated = [...prev];
-                const last = updated[updated.length - 1];
-                if (last && last.userId === data.userId) {
-                    last.points = [...last.points, ...(data.points || [])];
-                }
-                return [...updated];
+                updated[lineIdx] = { ...updated[lineIdx], points: [...updated[lineIdx].points, ...(data.points || [])] };
+                return updated;
             });
         });
-        socket.on('draw:end', () => { });
+        socket.on('draw:end', (data) => {
+            if (data?.userId) delete remoteStrokesRef.current[data.userId];
+        });
         socket.on('draw:clear', (data) => {
             if (data.pageId === activePageIdRef.current) {
                 setLines([]);
@@ -334,7 +348,7 @@ export default function BoardPage() {
             socket.off('chat:message');
             socket.off('page:create');
         };
-    }, [socket, boardId]);
+    }, [socket, boardId, board?.workspace]);
 
     // ── Generate unique shape ID ──
     const genId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -415,13 +429,13 @@ export default function BoardPage() {
             setIsDrawing(true);
         } else if (tool === 'sticky') {
             const id = genId();
-            const shape = { id, type: 'sticky', x: pos.x, y: pos.y, width: 160, height: 120, text: 'Note', fill: '#f59e0b', fontSize: 14 };
+            const shape = { id, type: 'sticky', x: pos.x, y: pos.y, width: 180, height: 140, text: '', fill: color === '#f1f5f9' ? '#f59e0b' : color, fontSize: 14 };
             setShapes(prev => [...prev, shape]);
             socket?.emit('shape:add', { boardId, pageId: activePageId, shape });
             pushHistory();
         } else if (tool === 'text') {
             const id = genId();
-            const shape = { id, type: 'text', x: pos.x, y: pos.y, text: '', fill: color, fontSize: 18 };
+            const shape = { id, type: 'text', x: pos.x, y: pos.y, text: 'Text', fill: color, fontSize: 18 };
             setShapes(prev => [...prev, shape]);
             socket?.emit('shape:add', { boardId, pageId: activePageId, shape });
             // Open inline editor immediately
@@ -429,7 +443,7 @@ export default function BoardPage() {
             if (stageBox) {
                 const absX = stageBox.left + pos.x * stageScale + stagePos.x;
                 const absY = stageBox.top + pos.y * stageScale + stagePos.y;
-                setEditingText({ id, x: absX, y: absY, width: 200, height: 32, value: '', type: 'text' });
+                setEditingText({ id, x: absX, y: absY, width: 200, height: 32, value: 'Text', type: 'text' });
             }
         }
     };
@@ -491,9 +505,18 @@ export default function BoardPage() {
             }
 
             if (shouldCommit) {
+                // In ER mode, auto-set default cardinality on arrows
+                if (isERMode && commitShape.type === 'arrow') {
+                    commitShape.cardinality = '1:N';
+                }
                 setShapes(prev => [...prev, commitShape]);
                 socket?.emit('shape:add', { boardId, pageId: activePageId, shape: commitShape });
                 setTimeout(() => pushHistory(), 0);
+                // In ER mode, auto-select the arrow and switch back to select tool
+                if (isERMode && commitShape.type === 'arrow') {
+                    setSelectedIds(new Set([commitShape.id]));
+                    setTool('select');
+                }
             }
             setDrawingShape(null);
         }
@@ -731,7 +754,7 @@ export default function BoardPage() {
             message: chatInput,
             timestamp: new Date().toISOString(),
         }]);
-        socket.emit('chat:message', { boardId, message: chatInput });
+        socket.emit('chat:message', { boardId, workspaceId: board?.workspace, message: chatInput });
         setChatInput('');
     };
 
@@ -742,9 +765,10 @@ export default function BoardPage() {
         e.target.value = ''; // Reset input
         const formData = new FormData();
         formData.append('file', file);
-        if (workspaceBoards.length > 0 && workspaceBoards[0].workspace) {
-            formData.append('workspaceId', workspaceBoards[0].workspace);
-        }
+        const wsId = board?.workspace
+            ? (typeof board.workspace === 'object' ? board.workspace._id : board.workspace)
+            : null;
+        if (wsId) formData.append('workspaceId', wsId);
 
         try {
             const { data } = await uploadFile(formData);
@@ -754,6 +778,7 @@ export default function BoardPage() {
                 const fileUrl = `${baseUrl}${data.url}`;
                 socket.emit('chat:message', {
                     boardId,
+                    workspaceId: wsId,
                     message: `Shared a file: ${fileUrl}`
                 });
             } else {
@@ -888,7 +913,7 @@ export default function BoardPage() {
             const id = genId();
             const shape = {
                 id, type: 'arch-icon', archId: iconData.id,
-                x: pos.x - 30, y: pos.y - 30, width: 60, height: 60,
+                x: pos.x - 40, y: pos.y - 40, width: 80, height: 80,
                 label: iconData.label, iconPath: iconData.path,
                 iconViewBox: iconData.viewBox, iconColor: iconData.color,
                 stroke: '#2a2a3e', strokeWidth: 1,
@@ -928,15 +953,19 @@ export default function BoardPage() {
     const commitTextEdit = useCallback((value) => {
         if (!editingText) return;
         const finalText = (value ?? editingText.value).trim();
-        if (finalText) {
-            setShapes(prev => prev.map(s => s.id === editingText.id ? { ...s, text: finalText } : s));
-            socket?.emit('shape:update', { boardId, pageId: activePageId, shapeId: editingText.id, updates: { text: finalText } });
-            setTimeout(() => pushHistory(), 0);
+
+        if (editingText.type === 'arch-label') {
+            // Architecture icon label edit
+            const labelToSave = finalText || editingText.value || 'Component';
+            setShapes(prev => prev.map(s => s.id === editingText.id ? { ...s, label: labelToSave } : s));
+            socket?.emit('shape:update', { boardId, pageId: activePageId, shapeId: editingText.id, updates: { label: labelToSave } });
         } else {
-            // Empty text — remove the shape
-            setShapes(prev => prev.filter(s => s.id !== editingText.id));
-            socket?.emit('shape:delete', { boardId, pageId: activePageId, shapeId: editingText.id });
+            // Regular text or sticky
+            const textToSave = finalText || 'Text';
+            setShapes(prev => prev.map(s => s.id === editingText.id ? { ...s, text: textToSave } : s));
+            socket?.emit('shape:update', { boardId, pageId: activePageId, shapeId: editingText.id, updates: { text: textToSave } });
         }
+        setTimeout(() => pushHistory(), 0);
         setEditingText(null);
     }, [editingText, socket, boardId, activePageId, pushHistory]);
 
@@ -986,7 +1015,7 @@ export default function BoardPage() {
     if (isArchMode) {
         availableTools = TOOLS.filter(t => ['select', 'pan', 'arrow', 'text'].includes(t.id));
     } else if (isERMode) {
-        availableTools = TOOLS.filter(t => ['select', 'pan'].includes(t.id));
+        availableTools = TOOLS.filter(t => ['select', 'pan', 'arrow'].includes(t.id));
     }
 
     return (
@@ -1004,13 +1033,12 @@ export default function BoardPage() {
                     </button>
                     {workspaceBoards.length > 1 ? (
                         <select
-                            className="input sm"
-                            style={{ fontWeight: 700, fontSize: 'var(--font-base)', background: 'transparent', border: 'none', color: 'var(--text)', cursor: 'pointer', paddingRight: '24px' }}
+                            className="board-switcher-select"
                             value={board?._id || ''}
                             onChange={(e) => navigate(`/board/${e.target.value}`)}
                         >
                             {workspaceBoards.map(wb => (
-                                <option key={wb._id} value={wb._id} style={{ background: 'var(--surface)' }}>{wb.title}</option>
+                                <option key={wb._id} value={wb._id}>{wb.title}</option>
                             ))}
                         </select>
                     ) : (
@@ -1129,6 +1157,16 @@ export default function BoardPage() {
                                     );
                                 }
                                 if (s.type === 'sticky') {
+                                    const sw = s.width || 180;
+                                    const sh = s.height || 140;
+                                    const stickyColors = {
+                                        '#f59e0b': { bg: '#fef3c7', text: '#78350f', fold: '#fbbf24' },
+                                        '#22c55e': { bg: '#dcfce7', text: '#14532d', fold: '#4ade80' },
+                                        '#6366f1': { bg: '#e0e7ff', text: '#312e81', fold: '#818cf8' },
+                                        '#ec4899': { bg: '#fce7f3', text: '#831843', fold: '#f472b6' },
+                                        '#06b6d4': { bg: '#cffafe', text: '#164e63', fold: '#22d3ee' },
+                                    };
+                                    const theme = stickyColors[s.fill] || { bg: s.fill || '#fef3c7', text: '#78350f', fold: '#fbbf24' };
                                     return (
                                         <Group key={s.id} id={s.id} x={s.x} y={s.y}
                                             draggable={tool === 'select'}
@@ -1141,22 +1179,37 @@ export default function BoardPage() {
                                                     const absX = stageBox.left + s.x * stageScale + stagePos.x;
                                                     const absY = stageBox.top + s.y * stageScale + stagePos.y;
                                                     setEditingText({
-                                                        id: s.id, x: absX + 10, y: absY + 10,
-                                                        width: (s.width || 160) - 20, height: (s.height || 120) - 20,
+                                                        id: s.id, x: absX + 12, y: absY + 12,
+                                                        width: sw - 24, height: sh - 24,
                                                         value: s.text || '', type: 'sticky'
                                                     });
                                                 }
                                             }}
                                         >
-                                            <Rect width={s.width || 160} height={s.height || 120}
-                                                fill={s.fill || '#f59e0b'} cornerRadius={6} opacity={0.9}
-                                                stroke={isSelected ? '#6366f1' : 'transparent'} strokeWidth={2}
-                                                shadowColor="rgba(0,0,0,0.3)" shadowBlur={8} shadowOffsetY={4}
+                                            {/* Shadow */}
+                                            <Rect x={3} y={4} width={sw} height={sh}
+                                                fill="rgba(0,0,0,0.08)" cornerRadius={4}
                                             />
-                                            <Text x={10} y={10} width={(s.width || 160) - 20} height={(s.height || 120) - 20}
-                                                text={s.text || 'Double-click to edit'} fill={s.text ? '#1a1a2e' : '#666'}
+                                            {/* Main body */}
+                                            <Rect width={sw} height={sh}
+                                                fill={theme.bg} cornerRadius={4}
+                                                stroke={isSelected ? '#6366f1' : 'transparent'} strokeWidth={2}
+                                            />
+                                            {/* Fold triangle */}
+                                            <Line points={[sw - 16, 0, sw, 0, sw, 16]} fill={theme.fold} closed />
+                                            {/* Title bar */}
+                                            <Rect x={0} y={0} width={sw} height={28}
+                                                fill={`${theme.fold}40`} cornerRadius={[4, 4, 0, 0]}
+                                            />
+                                            <Text x={8} y={7} width={sw - 16}
+                                                text="📌 Note" fill={theme.text} fontSize={11}
+                                                fontFamily="Inter" fontStyle="600" opacity={0.6}
+                                            />
+                                            {/* Content */}
+                                            <Text x={12} y={34} width={sw - 24} height={sh - 46}
+                                                text={s.text || 'Double-click to edit'} fill={s.text ? theme.text : `${theme.text}80`}
                                                 fontSize={s.fontSize || 14}
-                                                fontFamily="Inter" fontStyle="500"
+                                                fontFamily="Inter" fontStyle="500" lineHeight={1.4}
                                             />
                                         </Group>
                                     );
@@ -1165,27 +1218,83 @@ export default function BoardPage() {
                                     const hasCardinality = s.cardinality && s.cardinality !== 'none';
                                     const midX = (s.points[0] + s.points[2]) / 2;
                                     const midY = (s.points[1] + s.points[3]) / 2;
+                                    const arrColor = isSelected ? '#6366f1' : (s.stroke || '#94a3b8');
+                                    // Crow's foot rendering helpers
+                                    const dx = s.points[2] - s.points[0];
+                                    const dy = s.points[3] - s.points[1];
+                                    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+                                    const nx = dx / len;
+                                    const ny = dy / len;
+                                    const px = -ny; // perpendicular
+                                    const py = nx;
+                                    const cf = 10; // crow's foot spread
+                                    const cl = 14; // crow's foot line length
+
+                                    const renderCrowsFoot = (x, y, dir, type) => {
+                                        // dir: 1 = at target end, -1 = at source end
+                                        const dnx = nx * dir;
+                                        const dny = ny * dir;
+                                        if (type === 'many') {
+                                            return (
+                                                <Group>
+                                                    <Line points={[x, y, x - dnx * cl + px * cf, y - dny * cl + py * cf]} stroke={arrColor} strokeWidth={2} />
+                                                    <Line points={[x, y, x - dnx * cl - px * cf, y - dny * cl - py * cf]} stroke={arrColor} strokeWidth={2} />
+                                                    <Line points={[x, y, x - dnx * cl, y - dny * cl]} stroke={arrColor} strokeWidth={2} />
+                                                </Group>
+                                            );
+                                        }
+                                        if (type === 'one') {
+                                            const bx = x - dnx * 8;
+                                            const by = y - dny * 8;
+                                            return <Line points={[bx + px * cf, by + py * cf, bx - px * cf, by - py * cf]} stroke={arrColor} strokeWidth={2} />;
+                                        }
+                                        return null;
+                                    };
+
+                                    let sourceType = null;
+                                    let targetType = null;
+                                    if (hasCardinality) {
+                                        const c = s.cardinality;
+                                        if (c === '1:1') { sourceType = 'one'; targetType = 'one'; }
+                                        else if (c === '1:N') { sourceType = 'one'; targetType = 'many'; }
+                                        else if (c === 'N:1') { sourceType = 'many'; targetType = 'one'; }
+                                        else if (c === 'N:M') { sourceType = 'many'; targetType = 'many'; }
+                                        else if (c === '0..1') { sourceType = 'one'; targetType = 'one'; }
+                                        else if (c === '0..N') { sourceType = 'one'; targetType = 'many'; }
+                                    }
+
                                     return (
                                         <Group key={s.id} id={s.id}
                                             draggable={tool === 'select'}
                                             onClick={(e) => handleShapeClick(e, s.id)} onTap={(e) => handleShapeClick(e, s.id)}
                                             onDragEnd={(e) => {
-                                                const dx = e.target.x(); const dy = e.target.y();
-                                                const newPoints = s.points.map((p, i) => i % 2 === 0 ? p + dx : p + dy);
+                                                const ddx = e.target.x(); const ddy = e.target.y();
+                                                const newPoints = s.points.map((p, i) => i % 2 === 0 ? p + ddx : p + ddy);
                                                 e.target.x(0); e.target.y(0);
                                                 setShapes(prev => prev.map(sh => sh.id === s.id ? { ...sh, points: newPoints } : sh));
                                                 socket?.emit('shape:update', { boardId, pageId: activePageId, shapeId: s.id, updates: { points: newPoints } });
                                             }}
                                         >
-                                            <Arrow points={s.points}
-                                                stroke={isSelected ? '#6366f1' : s.stroke} strokeWidth={isSelected ? 3 : s.strokeWidth} fill={isSelected ? '#6366f1' : s.stroke}
-                                                tension={0} lineCap="round" lineJoin="round" pointerLength={10} pointerWidth={10}
+                                            <Line points={s.points}
+                                                stroke={arrColor} strokeWidth={isSelected ? 3 : (s.strokeWidth || 2)}
+                                                tension={0} lineCap="round" lineJoin="round"
                                             />
+                                            {/* Crow's foot notation at endpoints */}
+                                            {sourceType && renderCrowsFoot(s.points[0], s.points[1], -1, sourceType)}
+                                            {targetType && renderCrowsFoot(s.points[2], s.points[3], 1, targetType)}
+                                            {/* Arrow head for non-ER or when no cardinality */}
+                                            {!hasCardinality && (
+                                                <Arrow points={s.points}
+                                                    stroke={arrColor} strokeWidth={isSelected ? 3 : (s.strokeWidth || 2)} fill={arrColor}
+                                                    tension={0} lineCap="round" lineJoin="round" pointerLength={10} pointerWidth={10}
+                                                />
+                                            )}
                                             {hasCardinality && (
-                                                <Group x={midX} y={midY} offsetX={20} offsetY={10}>
-                                                    <Rect width={40} height={20} fill="#1a1a2e" cornerRadius={4} stroke="#8b5cf6" strokeWidth={1} />
-                                                    <Text width={40} align="center" verticalAlign="middle" height={20}
-                                                        text={s.cardinality} fill="#a78bfa" fontSize={11} fontFamily="Inter" fontStyle="bold"
+                                                <Group x={midX} y={midY} offsetX={22} offsetY={12}>
+                                                    <Rect width={44} height={24} fill="#12121e" cornerRadius={6} stroke="#8b5cf6" strokeWidth={1.5}
+                                                        shadowColor="rgba(99,102,241,0.2)" shadowBlur={6} />
+                                                    <Text width={44} align="center" verticalAlign="middle" height={24}
+                                                        text={s.cardinality} fill="#a78bfa" fontSize={12} fontFamily="Inter" fontStyle="bold"
                                                     />
                                                 </Group>
                                             )}
@@ -1193,22 +1302,49 @@ export default function BoardPage() {
                                     );
                                 }
                                 if (s.type === 'arch-icon') {
+                                    const iw = s.width || 80;
+                                    const ih = s.height || 80;
                                     return (
                                         <Group key={s.id} id={s.id} x={s.x} y={s.y}
                                             draggable={tool === 'select'}
                                             onClick={(e) => handleShapeClick(e, s.id)} onTap={(e) => handleShapeClick(e, s.id)}
                                             onDragEnd={(e) => handleShapeDragEnd(e, s)}
+                                            onDblClick={() => {
+                                                const stageBox = containerRef.current?.getBoundingClientRect();
+                                                if (stageBox) {
+                                                    const absX = stageBox.left + s.x * stageScale + stagePos.x;
+                                                    const absY = stageBox.top + (s.y + ih + 4) * stageScale + stagePos.y;
+                                                    setEditingText({ id: s.id, x: absX, y: absY, width: iw, height: 20, value: s.label || '', type: 'arch-label' });
+                                                }
+                                            }}
                                         >
-                                            <Rect width={s.width || 60} height={(s.height || 60) + 18}
-                                                fill="#14141f" stroke={isSelected ? '#6366f1' : (s.stroke || '#2a2a3e')}
-                                                strokeWidth={isSelected ? 2 : 1} cornerRadius={8}
+                                            {/* Selection ring */}
+                                            {isSelected && (
+                                                <Rect x={-3} y={-3} width={iw + 6} height={ih + 28}
+                                                    fill="transparent" stroke="#6366f1" strokeWidth={2} cornerRadius={12} dash={[4, 2]}
+                                                />
+                                            )}
+                                            {/* Gradient background */}
+                                            <Rect width={iw} height={ih}
+                                                fill="#14141f" stroke={s.stroke || '#2a2a3e'}
+                                                strokeWidth={1} cornerRadius={10}
+                                                shadowColor="rgba(0,0,0,0.4)" shadowBlur={8} shadowOffsetY={3}
                                             />
-                                            <Path x={10} y={6} data={s.iconPath}
+                                            {/* Icon color glow */}
+                                            <Rect x={4} y={4} width={iw - 8} height={ih - 8}
+                                                fill={`${s.iconColor || '#6366f1'}12`} cornerRadius={8}
+                                            />
+                                            {/* SVG Icon */}
+                                            <Path x={(iw - 38) / 2} y={(ih - 38) / 2} data={s.iconPath}
                                                 fill={s.iconColor || '#6366f1'} scaleX={1.6} scaleY={1.6}
                                             />
-                                            <Text y={(s.height || 60) + 2} width={s.width || 60}
-                                                text={s.label || ''} fill="#94a3b8" fontSize={10}
-                                                fontFamily="Inter, sans-serif" align="center"
+                                            {/* Label pill */}
+                                            <Rect x={4} y={ih + 4} width={iw - 8} height={20}
+                                                fill="rgba(255,255,255,0.05)" cornerRadius={6}
+                                            />
+                                            <Text x={4} y={ih + 6} width={iw - 8}
+                                                text={s.label || ''} fill="#cbd5e1" fontSize={10}
+                                                fontFamily="Inter, sans-serif" align="center" fontStyle="600"
                                             />
                                         </Group>
                                     );
@@ -1278,27 +1414,38 @@ export default function BoardPage() {
                         <div className="selection-bar glass">
                             <span>{selectedIds.size} selected</span>
 
-                            {/* Cardinality picker for ER relationships */}
-                            {selectedIds.size === 1 && shapes.find(s => s.id === [...selectedIds][0])?.type === 'arrow' && isERMode && (
-                                <select
-                                    className="input sm"
-                                    style={{ width: '80px', marginLeft: '8px', padding: '2px 8px' }}
-                                    value={shapes.find(s => s.id === [...selectedIds][0]).cardinality || 'none'}
-                                    onChange={(e) => {
-                                        const shapeId = [...selectedIds][0];
-                                        const card = e.target.value;
-                                        setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, cardinality: card } : s));
-                                        socket?.emit('shape:update', { boardId, pageId: activePageId, shapeId, updates: { cardinality: card } });
-                                        setTimeout(() => pushHistory(), 0);
-                                    }}
-                                >
-                                    <option value="none">Line</option>
-                                    <option value="1:1">1 : 1</option>
-                                    <option value="1:N">1 : N</option>
-                                    <option value="N:1">N : 1</option>
-                                    <option value="N:M">N : M</option>
-                                </select>
-                            )}
+                            {/* Visual Cardinality picker for ER relationships */}
+                            {selectedIds.size === 1 && shapes.find(s => s.id === [...selectedIds][0])?.type === 'arrow' && isERMode && (() => {
+                                const shapeId = [...selectedIds][0];
+                                const currentCard = shapes.find(s => s.id === shapeId)?.cardinality || 'none';
+                                const CARDINALITIES = [
+                                    { value: 'none', label: 'Line', icon: '━━━' },
+                                    { value: '1:1', label: 'One-to-One', icon: '┤├' },
+                                    { value: '1:N', label: 'One-to-Many', icon: '┤╞' },
+                                    { value: 'N:1', label: 'Many-to-One', icon: '╡├' },
+                                    { value: 'N:M', label: 'Many-to-Many', icon: '╡╞' },
+                                    { value: '0..1', label: 'Zero or One', icon: 'o┤├' },
+                                    { value: '0..N', label: 'Zero or Many', icon: 'o┤╞' },
+                                ];
+                                return (
+                                    <div className="cardinality-picker">
+                                        {CARDINALITIES.map((c) => (
+                                            <button key={c.value}
+                                                className={`card-option ${currentCard === c.value ? 'active' : ''}`}
+                                                onClick={() => {
+                                                    setShapes(prev => prev.map(s => s.id === shapeId ? { ...s, cardinality: c.value } : s));
+                                                    socket?.emit('shape:update', { boardId, pageId: activePageId, shapeId, updates: { cardinality: c.value } });
+                                                    setTimeout(() => pushHistory(), 0);
+                                                }}
+                                                title={c.label}
+                                            >
+                                                <span className="card-icon">{c.icon}</span>
+                                                <span className="card-lbl">{c.value === 'none' ? 'Line' : c.value}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                );
+                            })()}
 
                             <button className="btn btn-ghost btn-sm" onClick={duplicateSelected}><Copy size={14} /> Duplicate</button>
                             <button className="btn btn-ghost btn-sm" style={{ color: 'var(--danger)' }} onClick={deleteSelected}><Trash2 size={14} /> Delete</button>
@@ -1317,8 +1464,8 @@ export default function BoardPage() {
                                 width: Math.max(editingText.width, 120),
                                 minHeight: editingText.type === 'sticky' ? editingText.height : 32,
                                 fontSize: 16 * stageScale,
-                                color: editingText.type === 'sticky' ? '#1a1a2e' : '#f1f5f9',
-                                background: editingText.type === 'sticky' ? 'rgba(245, 158, 11, 0.95)' : 'rgba(20, 20, 31, 0.95)',
+                                color: editingText.type === 'sticky' ? '#78350f' : editingText.type === 'arch-label' ? '#cbd5e1' : '#f1f5f9',
+                                background: editingText.type === 'sticky' ? 'rgba(254, 243, 199, 0.95)' : editingText.type === 'arch-label' ? 'rgba(20, 20, 31, 0.95)' : 'rgba(20, 20, 31, 0.95)',
                             }}
                             value={editingText.value}
                             onChange={(e) => setEditingText(prev => ({ ...prev, value: e.target.value }))}
@@ -1363,6 +1510,23 @@ export default function BoardPage() {
                             ))}
                         </div>
                         <div className="ft-divider" />
+                        {/* Brush / Eraser size selector — visible for pencil and eraser */}
+                        {(tool === 'pencil' || tool === 'eraser') && (
+                            <>
+                                <div className="ft-group ft-sizes">
+                                    {SIZES.map((s) => (
+                                        <button key={s} className={`ft-size-btn ${brushSize === s ? 'active' : ''}`}
+                                            onClick={() => setBrushSize(s)} title={`Size ${s}`}>
+                                            <span className="ft-size-dot" style={{
+                                                width: Math.max(4, s * (tool === 'eraser' ? 1.5 : 1)),
+                                                height: Math.max(4, s * (tool === 'eraser' ? 1.5 : 1)),
+                                            }} />
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="ft-divider" />
+                            </>
+                        )}
                         <div className="ft-group">
                             <button className="ft-btn" onClick={undo} title="Undo (Ctrl+Z)"><Undo2 size={16} /></button>
                             <button className="ft-btn" onClick={redo} title="Redo (Ctrl+Y)"><Redo2 size={16} /></button>
@@ -1407,10 +1571,9 @@ export default function BoardPage() {
                                     chatMessages.map((msg, i) => {
                                         // Render URLs as clickable links
                                         const renderMessage = (text) => {
-                                            const urlRegex = /(https?:\/\/[^\s]+)/g;
-                                            const parts = text.split(urlRegex);
+                                            const parts = text.split(/(https?:\/\/[^\s]+)/g);
                                             return parts.map((part, j) =>
-                                                urlRegex.test(part)
+                                                /^https?:\/\//.test(part)
                                                     ? <a key={j} href={part} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)', textDecoration: 'underline' }}>{part.length > 50 ? part.substring(0, 50) + '...' : part}</a>
                                                     : part
                                             );

@@ -184,6 +184,23 @@ export default function WorkspaceDetail() {
                     initial="hidden"
                     animate="show"
                 >
+                    {/* Quick-create card */}
+                    <motion.div
+                        className="card board-card board-create-card"
+                        variants={item}
+                        onClick={() => setShowCreate(true)}
+                        whileHover={{ scale: 1.03 }}
+                        whileTap={{ scale: 0.97 }}
+                    >
+                        <div className="board-create-inner">
+                            <div className="board-create-icon">
+                                <Plus size={28} />
+                            </div>
+                            <h3>New Board</h3>
+                            <p>Whiteboard, Architecture, or ER Diagram</p>
+                        </div>
+                    </motion.div>
+
                     {boards.map((board) => (
                         <motion.div
                             key={board._id}

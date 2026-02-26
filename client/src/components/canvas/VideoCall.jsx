@@ -7,12 +7,33 @@ import {
 import Peer from 'simple-peer';
 import { getInitials, getAvatarColor } from '../../utils/helpers';
 
-// Free STUN servers for ICE candidate discovery
+// STUN + TURN servers for reliable ICE candidate discovery & relay fallback
 const ICE_SERVERS = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
+        // Free TURN relay servers (Open Relay by Metered) — fallback for symmetric NATs
+        {
+            urls: 'turn:a.relay.metered.ca:80',
+            username: 'e8dd65b92f070c41e0b060c3',
+            credential: '4F5qQhkjL+VhEJwi',
+        },
+        {
+            urls: 'turn:a.relay.metered.ca:80?transport=tcp',
+            username: 'e8dd65b92f070c41e0b060c3',
+            credential: '4F5qQhkjL+VhEJwi',
+        },
+        {
+            urls: 'turn:a.relay.metered.ca:443',
+            username: 'e8dd65b92f070c41e0b060c3',
+            credential: '4F5qQhkjL+VhEJwi',
+        },
+        {
+            urls: 'turns:a.relay.metered.ca:443?transport=tcp',
+            username: 'e8dd65b92f070c41e0b060c3',
+            credential: '4F5qQhkjL+VhEJwi',
+        },
     ],
 };
 
