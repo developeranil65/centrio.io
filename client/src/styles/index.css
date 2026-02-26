@@ -349,13 +349,13 @@ ol {
   white-space: nowrap;
   user-select: none;
   position: relative;
-  overflow: hidden;
 }
 
 .btn::after {
   content: '';
   position: absolute;
   inset: 0;
+  border-radius: inherit;
   background: linear-gradient(135deg, transparent 0%, rgba(255, 255, 255, 0.05) 100%);
   opacity: 0;
   transition: opacity var(--transition-fast);
@@ -592,7 +592,7 @@ ol {
   position: relative;
 }
 
-[data-tooltip]::after {
+[data-tooltip]::before {
   content: attr(data-tooltip);
   position: absolute;
   bottom: calc(100% + 8px);
@@ -612,7 +612,7 @@ ol {
   z-index: 999;
 }
 
-[data-tooltip]:hover::after {
+[data-tooltip]:hover::before {
   opacity: 1;
   transform: translateX(-50%) scale(1);
 }

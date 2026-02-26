@@ -38,9 +38,9 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
     const mountedRef = useRef(true);
 
     // ── Create a peer connection ──
-    const createPeer = useCallback((userId, userName, initiator, stream, signal) => {
-        if (peersRef.current[userId]) {
-            console.log(`[VideoCall] Peer already exists for ${userName} (${userId})`);
+    const createPeer = useCallback((socketId, userName, initiator, stream, signal) => {
+        if (peersRef.current[socketId]) {
+            console.log(`[VideoCall] Peer already exists for ${userName} (${socketId})`);
             return;
         }
 
@@ -56,10 +56,10 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
         peer.on('signal', (data) => {
             if (initiator) {
                 console.log(`[VideoCall] Sending offer to ${userName}`);
-                socket?.emit('call:offer', { to: userId, signal: data, roomId, userName: user?.name });
+                socket?.emit('call:offer', { to: socketId, signal: data, roomId, userName: user?.name });
             } else {
                 console.log(`[VideoCall] Sending answer to ${userName}`);
-                socket?.emit('call:answer', { to: userId, signal: data, roomId });
+                socket?.emit('call:answer', { to: socketId, signal: data, roomId });
             }
         });
 
@@ -68,7 +68,7 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
             if (mountedRef.current) {
                 setPeers(prev => ({
                     ...prev,
-                    [userId]: { ...prev[userId], stream: remoteStream },
+                    [socketId]: { ...prev[socketId], stream: remoteStream },
                 }));
                 setStatus('Connected');
             }
@@ -80,12 +80,13 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
 
         peer.on('close', () => {
             console.log(`[VideoCall] Peer closed: ${userName}`);
-            removePeer(userId);
+            removePeer(socketId);
         });
 
         peer.on('error', (err) => {
             console.error(`[VideoCall] Peer error with ${userName}:`, err.message);
-            removePeer(userId);
+            // Don't auto-remove on error, simple-peer sometimes errors on close gracefully
+            // removePeer(socketId);
         });
 
         // If we're the receiver, signal the incoming offer
@@ -93,10 +94,10 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
             peer.signal(signal);
         }
 
-        peersRef.current[userId] = peer;
+        peersRef.current[socketId] = peer;
         setPeers(prev => ({
             ...prev,
-            [userId]: { peer, stream: null, userName },
+            [socketId]: { peer, stream: null, userName },
         }));
 
         return peer;
@@ -175,22 +176,22 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
         if (!socket) return;
 
         // Another user joined the call — I am the initiator
-        const onUserJoined = ({ userId, userName }) => {
-            console.log(`[VideoCall] User joined: ${userName} (${userId})`);
-            if (userId === user?._id) return;
-            if (peersRef.current[userId]) return;
+        const onUserJoined = ({ socketId, userName }) => {
+            console.log(`[VideoCall] User joined: ${userName} (${socketId})`);
+            if (socketId === socket.id) return; // ignore our own join
+            if (peersRef.current[socketId]) return;
             if (!localStreamRef.current) {
                 console.log('[VideoCall] Stream not ready, will connect when they send offer');
                 return;
             }
-            createPeer(userId, userName, true, localStreamRef.current);
+            createPeer(socketId, userName, true, localStreamRef.current);
         };
 
         // Received an offer — I am the receiver
         const onOffer = ({ from, signal, userName }) => {
             console.log(`[VideoCall] Received offer from ${userName} (${from})`);
             if (peersRef.current[from]) {
-                // Already have a peer — just signal it
+                // Already have a peer — just signal it (likely an ICE candidate arriving early/late)
                 try { peersRef.current[from].signal(signal); } catch { }
                 return;
             }

@@ -114,46 +114,36 @@ const initSocket = (io) => {
 
         socket.on('call:offer', (data) => {
             const { to, signal, boardId, userName } = data;
-            const targetSocketId = userSocketMap.get(to);
-            console.log(`[Call] ${socket.userName} → offer → ${to} (socketId: ${targetSocketId || 'NOT FOUND'})`);
-            if (targetSocketId) {
-                io.to(targetSocketId).emit('call:offer', {
-                    from: socket.userId,
-                    signal,
-                    userName: userName || socket.userName,
-                });
-            } else {
-                console.warn(`[Call] Cannot route offer: no socket found for userId ${to}`);
-            }
+            // 'to' is now the target socketId
+            console.log(`[Call] ${socket.userName} → offer → socketId: ${to}`);
+            io.to(to).emit('call:offer', {
+                from: socket.id, // send my socketId as 'from'
+                signal,
+                userName: userName || socket.userName,
+            });
         });
 
         socket.on('call:answer', (data) => {
             const { to, signal } = data;
-            const targetSocketId = userSocketMap.get(to);
-            console.log(`[Call] ${socket.userName} → answer → ${to} (socketId: ${targetSocketId || 'NOT FOUND'})`);
-            if (targetSocketId) {
-                io.to(targetSocketId).emit('call:answer', {
-                    from: socket.userId,
-                    signal,
-                });
-            }
+            console.log(`[Call] ${socket.userName} → answer → socketId: ${to}`);
+            io.to(to).emit('call:answer', {
+                from: socket.id,
+                signal,
+            });
         });
 
         socket.on('call:ice-candidate', (data) => {
             const { to, candidate } = data;
-            const targetSocketId = userSocketMap.get(to);
-            if (targetSocketId) {
-                io.to(targetSocketId).emit('call:ice-candidate', {
-                    from: socket.userId,
-                    candidate,
-                });
-            }
+            io.to(to).emit('call:ice-candidate', {
+                from: socket.id,
+                candidate,
+            });
         });
 
         socket.on('call:end', (data) => {
-            const { boardId } = data;
-            socket.to(boardId).emit('call:end', {
-                from: socket.userId,
+            const { roomId } = data;
+            socket.to(`video-${roomId}`).emit('call:end', {
+                from: socket.id,
             });
         });
 
@@ -171,9 +161,12 @@ const initSocket = (io) => {
                     userId: socket.userId,
                     userName: socket.userName,
                 });
-                // Also end any call for this user
+                // Also end any call for this socket
                 io.to(boardId).emit('call:end', {
-                    from: socket.userId,
+                    from: socket.id,
+                });
+                io.to(`video-${boardId}`).emit('call:end', {
+                    from: socket.id,
                 });
             });
         });
