@@ -44,6 +44,20 @@ export function AuthProvider({ children }) {
         return data;
     };
 
+    const loginWithToken = async (token) => {
+        localStorage.setItem('centrio_token', token);
+        try {
+            const { data } = await getMe();
+            localStorage.setItem('centrio_user', JSON.stringify(data));
+            setUser(data);
+            toast.success('Successfully logged in with Google!');
+        } catch (error) {
+            localStorage.removeItem('centrio_token');
+            console.error('Failed to login with token', error);
+            toast.error('Google login failed, please try again.');
+        }
+    };
+
     const register = async (name, email, password) => {
         const { data } = await registerUser({ name, email, password });
         localStorage.setItem('centrio_token', data.token);
@@ -61,7 +75,7 @@ export function AuthProvider({ children }) {
     };
 
     return (
-        <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+        <AuthContext.Provider value={{ user, loading, login, loginWithToken, register, logout }}>
             {children}
         </AuthContext.Provider>
     );

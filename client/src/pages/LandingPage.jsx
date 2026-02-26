@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, animate } from 'framer-motion';
 import {
     ArrowRight, Zap, Shield, Users, Layers, Palette, GitBranch,
     Video, Database, LayoutGrid, Pencil, Star, ChevronRight,
     Globe, Clock, Lock, Sparkles
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const FEATURES = [
     {
@@ -88,12 +89,35 @@ const fadeUp = {
 
 export default function LandingPage() {
     const navigate = useNavigate();
+    const location = useLocation();
+    const { loginWithToken } = useAuth();
+    const hasAttemptedLogin = useRef(false);
+
     const [realStats, setRealStats] = useState({
         users: 0,
         workspaces: 0,
         uptime: '99.9%',
         security: '256-bit'
     });
+
+    // Intercept Google OAuth JWT token from URL
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        const token = params.get('token');
+
+        if (token && !hasAttemptedLogin.current) {
+            hasAttemptedLogin.current = true;
+
+            const authenticateWithGoogleToken = async () => {
+                // Clean up the URL first so it physically can't be read again
+                window.history.replaceState({}, document.title, '/');
+                await loginWithToken(token);
+                navigate('/dashboard');
+            };
+
+            authenticateWithGoogleToken();
+        }
+    }, [location.search, loginWithToken, navigate]);
 
     useEffect(() => {
         fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000/api'}/stats`)
