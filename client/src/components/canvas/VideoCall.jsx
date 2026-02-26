@@ -7,35 +7,53 @@ import {
 import Peer from 'simple-peer';
 import { getInitials, getAvatarColor } from '../../utils/helpers';
 
-// STUN + TURN servers for reliable ICE candidate discovery & relay fallback
-const ICE_SERVERS = {
+// Metered TURN API — fetches fresh credentials each call (free 50 GB/month)
+const METERED_API_KEY = '685ebde01d01e6b5e3d14a006a86956b34d6';
+
+// Fallback config with static TURN credentials in case the API call fails
+const FALLBACK_ICE = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        // Free TURN relay servers (Open Relay by Metered) — fallback for symmetric NATs
+        { urls: 'stun:stun.relay.metered.ca:80' },
         {
-            urls: 'turn:a.relay.metered.ca:80',
-            username: 'e8dd65b92f070c41e0b060c3',
-            credential: '4F5qQhkjL+VhEJwi',
+            urls: 'turn:global.relay.metered.ca:80',
+            username: '57dab719154a4cc660177d86',
+            credential: 'ZD9h4Jc5f2m2FIXp',
         },
         {
-            urls: 'turn:a.relay.metered.ca:80?transport=tcp',
-            username: 'e8dd65b92f070c41e0b060c3',
-            credential: '4F5qQhkjL+VhEJwi',
+            urls: 'turn:global.relay.metered.ca:80?transport=tcp',
+            username: '57dab719154a4cc660177d86',
+            credential: 'ZD9h4Jc5f2m2FIXp',
         },
         {
-            urls: 'turn:a.relay.metered.ca:443',
-            username: 'e8dd65b92f070c41e0b060c3',
-            credential: '4F5qQhkjL+VhEJwi',
+            urls: 'turn:global.relay.metered.ca:443',
+            username: '57dab719154a4cc660177d86',
+            credential: 'ZD9h4Jc5f2m2FIXp',
         },
         {
-            urls: 'turns:a.relay.metered.ca:443?transport=tcp',
-            username: 'e8dd65b92f070c41e0b060c3',
-            credential: '4F5qQhkjL+VhEJwi',
+            urls: 'turns:global.relay.metered.ca:443?transport=tcp',
+            username: '57dab719154a4cc660177d86',
+            credential: 'ZD9h4Jc5f2m2FIXp',
         },
     ],
 };
+
+/** Fetch fresh TURN + STUN credentials from Metered */
+async function fetchIceServers() {
+    try {
+        const res = await fetch(
+            `https://centrio.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`
+        );
+        if (!res.ok) throw new Error(`Metered API ${res.status}`);
+        const iceServers = await res.json();
+        console.log('[VideoCall] Fetched fresh TURN credentials:', iceServers.length, 'servers');
+        return { iceServers };
+    } catch (err) {
+        console.warn('[VideoCall] Failed to fetch TURN credentials, using STUN-only fallback:', err.message);
+        return FALLBACK_ICE;
+    }
+}
+
+const MAX_RETRIES = 3;
 
 /**
  * VideoCall — Zoom-like floating video panel with WebRTC via simple-peer.
@@ -57,6 +75,8 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
     const pendingOffersRef = useRef([]);
     const screenStreamRef = useRef(null);
     const mountedRef = useRef(true);
+    const iceConfigRef = useRef(FALLBACK_ICE);
+    const retryCountRef = useRef({});
 
     // ── Create a peer connection ──
     const createPeer = useCallback((socketId, userName, initiator, stream, signal) => {
@@ -65,13 +85,14 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
             return;
         }
 
-        console.log(`[VideoCall] Creating ${initiator ? 'initiator' : 'receiver'} peer for ${userName}`);
+        const retryNum = retryCountRef.current[socketId] || 0;
+        console.log(`[VideoCall] Creating ${initiator ? 'initiator' : 'receiver'} peer for ${userName}${retryNum ? ` (retry ${retryNum})` : ''}`);
 
         const peer = new Peer({
             initiator,
             trickle: true,
             stream,
-            config: ICE_SERVERS,
+            config: iceConfigRef.current,
         });
 
         peer.on('signal', (data) => {
@@ -106,8 +127,24 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
 
         peer.on('error', (err) => {
             console.error(`[VideoCall] Peer error with ${userName}:`, err.message);
-            // Don't auto-remove on error, simple-peer sometimes errors on close gracefully
-            // removePeer(socketId);
+            // Auto-retry on connection failure (up to MAX_RETRIES)
+            if (err.message === 'Connection failed.' && mountedRef.current) {
+                const count = (retryCountRef.current[socketId] || 0) + 1;
+                retryCountRef.current[socketId] = count;
+                if (count <= MAX_RETRIES && localStreamRef.current) {
+                    console.log(`[VideoCall] Retrying connection to ${userName} (${count}/${MAX_RETRIES})...`);
+                    removePeer(socketId);
+                    setTimeout(() => {
+                        if (mountedRef.current) {
+                            createPeer(socketId, userName, initiator, localStreamRef.current, signal);
+                        }
+                    }, 1000 * count); // exponential-ish backoff
+                } else {
+                    console.warn(`[VideoCall] Giving up on ${userName} after ${MAX_RETRIES} retries`);
+                    retryCountRef.current[socketId] = 0;
+                    removePeer(socketId);
+                }
+            }
         });
 
         // If we're the receiver, signal the incoming offer
@@ -131,6 +168,10 @@ export default function VideoCall({ socket, roomId, user, onClose }) {
 
         const initCamera = async () => {
             try {
+                // Fetch fresh TURN credentials before starting
+                const iceConfig = await fetchIceServers();
+                iceConfigRef.current = iceConfig;
+
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
                     audio: { echoCancellation: true, noiseSuppression: true },
