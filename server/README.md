@@ -69,3 +69,4 @@ The WebSocket architecture is modularized to handle distinct domains of real-tim
 *   JSON Web Tokens (JWT) are used for stateless API authentication.
 *   `helmet` and carefully configured `cors` middleware are implemented to protect against standard vulnerabilities.
 *   WebRTC interactions use unguessable, session-bound WebSocket IDs to prevent cross-talk.
+
